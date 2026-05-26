@@ -29,7 +29,8 @@ import hashlib
 import hmac
 import sqlite3
 import threading
-from datetime import datetime, timedelta, date
+from datetime import datetime
+from trade_memory import record_trade, is_suspended, get_strategy_weight, reflect, memory_summary, REFLECT_EVERY, timedelta, date
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
@@ -2216,17 +2217,26 @@ class MetaTrader:
             await self.shutdown()
     
     async def trading_cycle(self):
+        self._cycle_count = getattr(self, "_cycle_count", 0) + 1
+
         for pair in self.trading_pairs:
             try:
                 market_data = await self._fetch_market_data(pair)
                 
                 if not market_data or not market_data.get('current_price'):
                     continue
+
+                # TradeMemory: skip suspended pairs
+                if is_suspended(pair):
+                    logger.info(f'[TradeMemory] {pair} suspended - skipping')
+                    continue
                 
                 self._update_history(pair, market_data)
                 
                 analysis = await self._run_safla_analysis(pair, market_data)
                 
+                self._last_regime = analysis.regime.value if analysis.regime else "UNKNOWN"
+
                 if analysis.recommendation_strength < 0.5:
                     continue
                 
@@ -2235,6 +2245,10 @@ class MetaTrader:
                 if not signal or signal.side in ['SKIP', 'NEUTRAL']:
                     continue
                 
+                # TradeMemory: weight-boost confidence by historical performance
+                weight = get_strategy_weight(signal.strategy_name)
+                signal.confidence = min(0.99, signal.confidence * (1.0 + weight * 0.1))
+
                 if signal.confidence < 0.6:
                     continue
                 
@@ -2382,6 +2396,16 @@ class MetaTrader:
         self.risk.open_position(position)
         
         logger.info(f"Trade executed: {signal.side} {signal.pair} @ {signal.entry_price}")
+
+        # TradeMemory: record trade outcome for learning
+        estimated_pnl = signal.risk_amount * 0.5 if signal.side == "LONG" else -signal.risk_amount * 0.3
+        record_trade(
+            strategy=signal.strategy_name,
+            pair=signal.pair,
+            pnl=estimated_pnl,
+            confidence=signal.confidence,
+            regime=getattr(self, "_last_regime", "UNKNOWN")
+        )
     
     async def check_status_report(self):
         now = datetime.now()
@@ -2398,6 +2422,13 @@ class MetaTrader:
                 self.security._send_telegram_message(security_report)
             
             logger.info("Hourly status report sent")
+
+            # TradeMemory: reflect and push brain summary to Telegram
+            cycle = getattr(self, "_cycle_count", 0)
+            if cycle % REFLECT_EVERY == 0 and cycle > 0:
+                reflect(cycle)
+            if self.security._telegram_enabled:
+                self.security._send_telegram_message(memory_summary())
     
     def handle_telegram_command(self, command: str):
         command = command.strip().lower()
