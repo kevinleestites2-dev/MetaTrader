@@ -1,0 +1,47 @@
+name: MetaTrader — Pantheon Trading Engine
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Kalshi Private Key
+        run: |
+          echo "${{ secrets.KALSHI_PRIVATE_KEY }}" > kalshi.key
+
+      - name: Run MetaTrader
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID }}
+          KALSHI_PRIVATE_KEY_PATH: kalshi.key
+          POLYMARKET_API_KEY: ${{ secrets.POLYMARKET_API_KEY }}
+          POLYMARKET_API_SECRET: ${{ secrets.POLYMARKET_API_SECRET }}
+          POLYMARKET_API_PASSPHRASE: ${{ secrets.POLYMARKET_API_PASSPHRASE }}
+          METATRADER_MASTER_KEY: ${{ secrets.METATRADER_MASTER_KEY }}
+          TOTAL_CAPITAL_USD: ${{ secrets.TOTAL_CAPITAL_USD }}
+        run: python metatrader.py
+
+      - name: Self-Restart
+        if: always()
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: metatrader.yml
+          token: ${{ secrets.GITHUB_TOKEN }}
